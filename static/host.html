@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>稿件匿名互评 · 主持</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <h1>主持台</h1>
+  <p id="fatal" class="error" hidden></p>
+
+  <div id="content">
+    <p id="published-banner" class="banner" hidden>已公布：参与者现在可以看到自己收到的匿名意见，稿件与意见均已锁定。</p>
+
+    <section class="card">
+      <h2>互评进度</h2>
+      <p id="pending-summary" class="muted"></p>
+      <table>
+        <thead><tr><th>姓名</th><th>互评意见状态</th></tr></thead>
+        <tbody id="reviewers"></tbody>
+      </table>
+      <div class="row-actions">
+        <button id="publish" class="primary" disabled>全部公布</button>
+      </div>
+      <p class="muted">只有每篇当前稿件都有有效意见时才能公布；公布为一次性操作，公布后稿件与意见均不可再改。</p>
+      <p id="error" class="error"></p>
+    </section>
+
+    <section class="card">
+      <h2>个人链接（分发给对应的人）</h2>
+      <table>
+        <thead><tr><th>姓名</th><th>个人链接</th><th>操作</th></tr></thead>
+        <tbody id="links"></tbody>
+      </table>
+      <p class="muted">个人链接泄露时，可在公布前后为该成员换发链接：换发后原链接立即作废（再使用一律无效），新链接沿用其稿件、版本、意见与问答；其他人的链接不受影响。</p>
+      <p id="rotate-error" class="error"></p>
+    </section>
+  </div>
+</main>
+<script src="/static/host.js"></script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+* { box-sizing: border-box; }
+body {
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  margin: 0;
+  background: #f6f7f9;
+  color: #222;
+  line-height: 1.6;
+}
+main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.15rem; margin: 0 0 0.6em; }
+h3 { font-size: 1rem; }
+.card {
+  background: #fff;
+  border: 1px solid #e3e5e8;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 12px 0;
+}
+label { display: block; margin: 10px 0 4px; font-weight: 600; }
+input:not([type]), input[type="text"], textarea {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #c9ccd1;
+  border-radius: 6px;
+  font: inherit;
+}
+textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+button {
+  padding: 8px 16px;
+  border: 1px solid #c9ccd1;
+  background: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+}
+button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.link { border: none; background: none; color: #2563eb; padding: 4px; }
+table { border-collapse: collapse; width: 100%; background: #fff; }
+td, th { border: 1px solid #e3e5e8; padding: 8px 10px; text-align: left; word-break: break-all; }
+.error { color: #b91c1c; }
+.ok { color: #15803d; }
+.pending { color: #b45309; }
+.muted { color: #666; font-weight: 400; }
+pre.manuscript-view {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #fbfbfb;
+  border: 1px solid #e3e5e8;
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+  margin: 8px 0;
+}
+.banner {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  padding: 10px 14px;
+  border-radius: 8px;
+}
+.person-head { display: flex; justify-content: space-between; align-items: center; }
+.row-actions { display: flex; gap: 12px; margin: 12px 0 4px; }
+.clarify {
+  border-top: 1px dashed #c9ccd1;
+  margin-top: 14px;
+  padding-top: 10px;
+}
+.clarify h3 { margin: 6px 0; }
+.clarify-item {
+  background: #f6f7f9;
+  border: 1px solid #e3e5e8;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 8px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

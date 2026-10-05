@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>稿件匿名互评 · 创建</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <h1>稿件匿名互评</h1>
+  <p class="muted">录入 3～8 人的姓名与纯文本稿件。名单固定，按录入顺序循环互评：每人评下一人，末位评首位。创建后生成私密主持链接与每人一个的个人链接，无需注册。</p>
+
+  <form id="create-form">
+    <div id="people"></div>
+    <div class="row-actions">
+      <button type="button" id="add-person">＋ 添加一人</button>
+      <button type="submit" class="primary">生成私密链接</button>
+    </div>
+    <p id="error" class="error"></p>
+  </form>
+
+  <section id="result" class="card" hidden>
+    <h2>创建成功</h2>
+    <p class="error"><strong>请立即保存并分发以下链接，丢失无法找回。</strong></p>
+    <p>主持链接（自己保留）：<a id="host-link" href="#"></a></p>
+    <h3>个人链接（分发给对应的人）</h3>
+    <table>
+      <thead><tr><th>姓名</th><th>个人链接</th></tr></thead>
+      <tbody id="links-table"></tbody>
+    </table>
+  </section>
+</main>
+<script src="/static/index.js"></script>
+</body>
+</html>

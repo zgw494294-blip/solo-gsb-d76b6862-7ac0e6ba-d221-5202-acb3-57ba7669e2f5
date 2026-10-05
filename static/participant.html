@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>稿件匿名互评 · 参与</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <h1>参与互评</h1>
+  <p id="fatal" class="error" hidden></p>
+
+  <div id="content">
+    <p>你好，<strong id="my-name"></strong>。你可以修改自己的稿件、阅读分配给你的稿件并提交意见。页面不显示他人姓名。</p>
+    <p id="published-banner" class="banner" hidden>已公布：稿件与意见均已锁定，你收到的匿名意见见页面底部。</p>
+
+    <section class="card">
+      <h2>我的稿件 <span id="my-version" class="muted"></span></h2>
+      <textarea id="my-manuscript" rows="8"></textarea>
+      <div class="row-actions">
+        <button id="save-manuscript" class="primary">保存稿件</button>
+      </div>
+      <p class="muted">注意：保存新版本后，别人针对旧版本已提交的意见会立即失效。</p>
+      <p id="ms-msg"></p>
+    </section>
+
+    <section class="card">
+      <h2>分配给我评审的稿件 <span id="assignment-version" class="muted"></span></h2>
+      <pre id="assignment" class="manuscript-view"></pre>
+      <p id="assignment-notice" class="pending" hidden>稿件已更新为最新版本，请重新阅读后再提交意见。</p>
+    </section>
+
+    <section class="card">
+      <h2>我的评审意见</h2>
+      <p id="review-status" class="muted"></p>
+      <textarea id="my-review" rows="6" placeholder="针对上面这篇稿件的意见"></textarea>
+      <div class="row-actions">
+        <button id="submit-review" class="primary">提交意见</button>
+      </div>
+      <p class="muted">提交绑定你当前读到的稿件版本；若对方更新了稿件，需重新阅读后再提交。</p>
+      <p id="review-msg"></p>
+
+      <div id="answer-box" class="clarify" hidden>
+        <h3>作者对这条意见的澄清问题</h3>
+        <div id="answer-question" class="clarify-item"></div>
+        <div id="answer-form">
+          <textarea id="answer-input" rows="4" placeholder="对该问题的答复（仅可答复一次，提交后不可修改）"></textarea>
+          <div class="row-actions">
+            <button id="submit-answer" class="primary">提交答复</button>
+          </div>
+          <p id="answer-msg"></p>
+        </div>
+        <div id="answer-done" class="clarify-item" hidden>
+          <strong>我的答复：</strong><span id="answer-text"></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="received-section" class="card" hidden>
+      <h2>我收到的匿名意见</h2>
+      <pre id="received" class="manuscript-view"></pre>
+
+      <div id="question-box" class="clarify">
+        <h3>对该意见提出澄清问题</h3>
+        <p class="muted">公布后可就收到的匿名意见提一次澄清问题，对应评审者将答复一次；每条意见仅一问一答，提交后均不可修改。页面不会显示对方姓名或链接。</p>
+        <div id="question-form">
+          <textarea id="question-input" rows="4" placeholder="针对这条意见的澄清问题（仅可提问一次，提交后不可修改）"></textarea>
+          <div class="row-actions">
+            <button id="submit-question" class="primary">提交问题</button>
+          </div>
+          <p id="question-msg"></p>
+        </div>
+        <div id="question-done" class="clarify-item" hidden>
+          <strong>我的问题：</strong><span id="question-text"></span>
+          <p id="answer-view" class="muted"></p>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+<script src="/static/participant.js"></script>
+</body>
+</html>
