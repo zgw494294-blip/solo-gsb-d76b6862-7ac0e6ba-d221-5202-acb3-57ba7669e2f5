@@ -37,6 +37,7 @@ button {
 button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.link { border: none; background: none; color: #2563eb; padding: 4px; }
+button.link.danger { color: #b91c1c; }
 table { border-collapse: collapse; width: 100%; background: #fff; }
 td, th { border: 1px solid #e3e5e8; padding: 8px 10px; text-align: left; word-break: break-all; }
 .error { color: #b91c1c; }

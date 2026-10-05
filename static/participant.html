@@ -29,6 +29,12 @@
       <h2>分配给我评审的稿件 <span id="assignment-version" class="muted"></span></h2>
       <pre id="assignment" class="manuscript-view"></pre>
       <p id="assignment-notice" class="pending" hidden>稿件已更新为最新版本，请重新阅读后再提交意见。</p>
+      <div id="reassign-notice" class="pending" hidden>
+        <p>评审分配已变更（有成员退出）：请重新阅读上方新分配的稿件。你未提交的意见文本已保留，确认重新阅读前提交已禁用。</p>
+        <div class="row-actions">
+          <button id="confirm-reassign" type="button">我已重新阅读新分配的稿件</button>
+        </div>
+      </div>
     </section>
 
     <section class="card">
@@ -38,7 +44,7 @@
       <div class="row-actions">
         <button id="submit-review" class="primary">提交意见</button>
       </div>
-      <p class="muted">提交绑定你当前读到的稿件版本；若对方更新了稿件，需重新阅读后再提交。</p>
+      <p class="muted">提交绑定你当前读到的稿件版本与分配；若对方更新了稿件或有成员退出导致分配变更，需重新阅读后再提交。</p>
       <p id="review-msg"></p>
 
       <div id="answer-box" class="clarify" hidden>

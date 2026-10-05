@@ -62,11 +62,18 @@ function render(s) {
     const tdAction = document.createElement("td");
     const rotateBtn = document.createElement("button");
     rotateBtn.type = "button";
-    rotateBtn.className = "link";
+    rotateBtn.className = "link rotate";
     rotateBtn.textContent = "换发链接";
     rotateBtn.dataset.name = l.name;
     rotateBtn.dataset.link = location.origin + l.url;
-    tdAction.appendChild(rotateBtn);
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "link danger remove";
+    removeBtn.textContent = "移除";
+    removeBtn.dataset.name = l.name;
+    // 仅公布前可移除，且移除后至少剩 3 人（服务端同样强制）
+    removeBtn.disabled = s.published || s.links.length <= 3;
+    tdAction.append(rotateBtn, removeBtn);
     tr.append(tdName, tdLink, tdAction);
     linksBody.appendChild(tr);
   }
@@ -91,10 +98,10 @@ publishBtn.addEventListener("click", async () => {
 
 // 换发某人的个人链接：请求携带姓名与页面所见链接，成功后原链接立即作废
 document.getElementById("links").addEventListener("click", async (e) => {
-  const btn = e.target.closest("button.link");
-  if (!btn) return;
-  const name = btn.dataset.name;
-  const link = btn.dataset.link;
+  const rotateBtn = e.target.closest("button.rotate");
+  if (!rotateBtn) return;
+  const name = rotateBtn.dataset.name;
+  const link = rotateBtn.dataset.link;
   const rotateError = document.getElementById("rotate-error");
   rotateError.textContent = "";
   if (
@@ -105,7 +112,7 @@ document.getElementById("links").addEventListener("click", async (e) => {
     )
   )
     return;
-  btn.disabled = true;
+  rotateBtn.disabled = true;
   try {
     const r = await fetch("/api/h/" + token + "/rotate-link", {
       method: "POST",
@@ -124,6 +131,40 @@ document.getElementById("links").addEventListener("click", async (e) => {
     );
   } catch {
     rotateError.textContent = "网络错误，请重试";
+  }
+  refresh();
+});
+
+// 移除退出成员（仅公布前）：其链接立即永久失效，互评环按原顺序闭合，不可恢复
+document.getElementById("links").addEventListener("click", async (e) => {
+  const removeBtn = e.target.closest("button.remove");
+  if (!removeBtn) return;
+  const name = removeBtn.dataset.name;
+  const removeError = document.getElementById("remove-error");
+  removeError.textContent = "";
+  if (
+    !confirm(
+      `确定移除「${name}」？\n` +
+        "移除后其个人链接立即永久失效，其发出与收到的意见不再计入公布条件；" +
+        "原评审其稿件的成员将改评下一位留存成员。此操作不可恢复。"
+    )
+  )
+    return;
+  removeBtn.disabled = true;
+  try {
+    const r = await fetch("/api/h/" + token + "/remove-member", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      removeError.textContent =
+        "移除「" + name + "」失败：" + (data.error || "请刷新主持台后重试");
+      return;
+    }
+  } catch {
+    removeError.textContent = "网络错误，请重试";
   }
   refresh();
 });
