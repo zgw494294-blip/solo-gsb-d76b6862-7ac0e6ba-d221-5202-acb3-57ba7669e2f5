@@ -11,6 +11,13 @@
 - 个人链接泄露时，主持人可凭主持链接在主持台为指定成员换发链接（公布前后均可）：
   生成新随机链接更新主持台，旧链接立即作废——其之后发起的状态读取与一切写入均 404；
   新链接沿用同一参与者的稿件、版本、分配、意见与问答，不重建身份、不使意见失效。
+- 公布前主持人可凭主持链接与姓名移除成员（不能补人、不能恢复）：留存成员按原录入顺序
+  重新闭合互评环，移除后至少留 3 人。退出者的个人链接永久失效（一切读取与写入 404），
+  其发出或收到的意见均不计入公布条件；仅"原来评退出者"的人改评下一位留存成员，
+  其旧意见失效并换发新的匿名分配凭据，其他人的稿件、版本、意见与链接全部保留。
+- 参与状态随快照返回不暴露作者身份的分配凭据；提交意见同时校验凭据与稿件版本，
+  分配改变后缺少凭据或沿用旧凭据一律 409（即使两篇稿件版本号相同）；分配从未变过时
+  兼容不带凭据的旧提交格式。移除、意见提交与公布在写事务内按提交顺序串行生效。
 - 所有写操作在 BEGIN IMMEDIATE 事务内"先检查后变更"，拒绝即整体回滚，不留部分变更。
 - 状态读取（参与页、主持台）在单个只读事务内完成：整个响应取自同一快照；
   WAL 下读取不阻塞其他连接的写入，写入也不阻塞读取。
@@ -48,6 +55,9 @@ CREATE TABLE IF NOT EXISTS participants (
     position INTEGER NOT NULL,
     manuscript TEXT NOT NULL,
     version INTEGER NOT NULL DEFAULT 1,
+    active INTEGER NOT NULL DEFAULT 1,
+    assignment_nonce TEXT NOT NULL DEFAULT '',
+    assignment_gen INTEGER NOT NULL DEFAULT 0,
     UNIQUE (session_id, position)
 );
 CREATE TABLE IF NOT EXISTS reviews (
@@ -85,13 +95,35 @@ app = Flask(__name__)
 def init_db():
     """建库建表（幂等），数据落盘在 DB_PATH，重启后保留。
 
-    旧版数据库（无 clarifications / token_history 表）启动时自动补建问答表与
-    历史链接表，既有 sessions/participants/reviews 数据原样保留。
+    旧版数据库（无 clarifications / token_history 表，或 participants 缺
+    active / assignment_nonce / assignment_gen 列）启动时自动补建问答表、
+    历史链接表与移除成员所需列，既有 sessions/participants/reviews 数据原样保留；
+    补列时为每位既有成员回填一个分配凭据（视为其当前分配从未变过，gen=0），
+    旧库因此自动支持移除成员，无需手动迁移。
     """
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    cols = {
+        r[1]
+        for r in conn.execute("PRAGMA table_info(participants)").fetchall()
+    }
+    if "active" not in cols:
+        conn.execute("ALTER TABLE participants ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+    if "assignment_nonce" not in cols:
+        conn.execute("ALTER TABLE participants ADD COLUMN assignment_nonce TEXT NOT NULL DEFAULT ''")
+    if "assignment_gen" not in cols:
+        conn.execute("ALTER TABLE participants ADD COLUMN assignment_gen INTEGER NOT NULL DEFAULT 0")
+    # 旧库既有成员：回填一个分配凭据，标记为"分配从未变过"（gen=0，兼容旧提交格式）
+    rows = conn.execute(
+        "SELECT id FROM participants WHERE assignment_nonce=''"
+    ).fetchall()
+    for (pid,) in rows:
+        conn.execute(
+            "UPDATE participants SET assignment_nonce=? WHERE id=?",
+            (secrets.token_urlsafe(24), pid),
+        )
     conn.commit()
     conn.close()
 
@@ -131,14 +163,21 @@ def err(message, status=400, **extra):
 
 
 def get_target(conn, session_id, position):
-    """循环分配：position 处的人评 (position+1) % n 处的人，末位评首位。"""
-    n = conn.execute(
-        "SELECT COUNT(*) AS c FROM participants WHERE session_id=?", (session_id,)
-    ).fetchone()["c"]
-    next_pos = (position + 1) % n
+    """循环分配（按原录入顺序，在留存成员间闭合）：position 之后第一位仍留存的人；
+    其后无人时回到首位仍留存者。移除成员后环自然闭合，例如 [甲,乙,丙,丁] 移除乙后，
+    甲评丙、丙评丁、丁评甲。
+    """
+    later = conn.execute(
+        "SELECT * FROM participants WHERE session_id=? AND active=1 AND position>? "
+        "ORDER BY position LIMIT 1",
+        (session_id, position),
+    ).fetchone()
+    if later is not None:
+        return later
     return conn.execute(
-        "SELECT * FROM participants WHERE session_id=? AND position=?",
-        (session_id, next_pos),
+        "SELECT * FROM participants WHERE session_id=? AND active=1 "
+        "ORDER BY position LIMIT 1",
+        (session_id,),
     ).fetchone()
 
 
@@ -149,14 +188,16 @@ def find_session_by_host(conn, host_token):
 
 
 def find_participant(conn, token):
+    # 退出（移除）成员的个人链接永久失效：连同其历史链接一律按不存在处理（404）
     return conn.execute(
-        "SELECT * FROM participants WHERE token=?", (token,)
+        "SELECT * FROM participants WHERE token=? AND active=1", (token,)
     ).fetchone()
 
 
 def find_participant_by_name(conn, session_id, name):
+    # 已移除者"成员不存在"：不能凭旧姓名再次操作（不支持恢复/补人）
     return conn.execute(
-        "SELECT * FROM participants WHERE session_id=? AND name=?",
+        "SELECT * FROM participants WHERE session_id=? AND name=? AND active=1",
         (session_id, name),
     ).fetchone()
 
@@ -195,6 +236,18 @@ def new_participant_token(conn):
             return token
 
 
+def new_assignment_nonce(conn):
+    """生成不与任何当前分配凭据冲突的随机凭据（不暴露作者身份）。"""
+    while True:
+        nonce = secrets.token_urlsafe(24)
+        exists = conn.execute(
+            "SELECT 1 FROM participants WHERE assignment_nonce=? AND active=1 LIMIT 1",
+            (nonce,),
+        ).fetchone()
+        if exists is None:
+            return nonce
+
+
 def find_review_by_reviewer(conn, session_id, reviewer_id):
     return conn.execute(
         "SELECT * FROM reviews WHERE session_id=? AND reviewer_id=?",
@@ -203,9 +256,12 @@ def find_review_by_reviewer(conn, session_id, reviewer_id):
 
 
 def review_is_current(review_row, target_row):
+    # target 必须仍是当前被分配对象：分配改变（移除成员导致改评下一位）后旧意见失效，
+    # 即便两篇稿件的版本号恰好相同
     return (
         review_row is not None
         and review_row["valid"]
+        and review_row["target_id"] == target_row["id"]
         and review_row["target_version"] == target_row["version"]
     )
 
@@ -281,9 +337,9 @@ def create_session():
         for i, (name, text) in enumerate(cleaned):
             token = secrets.token_urlsafe(24)
             conn.execute(
-                "INSERT INTO participants (session_id, token, name, position, manuscript)"
-                " VALUES (?,?,?,?,?)",
-                (session_id, token, name, i, text),
+                "INSERT INTO participants (session_id, token, name, position, manuscript, assignment_nonce)"
+                " VALUES (?,?,?,?,?,?)",
+                (session_id, token, name, i, text, secrets.token_urlsafe(24)),
             )
             links.append({"name": name, "url": f"/p/{token}"})
         conn.commit()
@@ -306,7 +362,7 @@ def host_status(host_token):
             conn.rollback()
             return err("主持链接无效", 404)
         parts = conn.execute(
-            "SELECT * FROM participants WHERE session_id=? ORDER BY position",
+            "SELECT * FROM participants WHERE session_id=? AND active=1 ORDER BY position",
             (session["id"],),
         ).fetchall()
         reviewers = []
@@ -347,13 +403,15 @@ def publish(host_token):
             conn.rollback()
             return err("已经公布过了", 409)
         parts = conn.execute(
-            "SELECT * FROM participants WHERE session_id=? ORDER BY position",
+            "SELECT * FROM participants WHERE session_id=? AND active=1 ORDER BY position",
             (session["id"],),
         ).fetchall()
         missing = []
         for p in parts:
             review = conn.execute(
-                "SELECT 1 FROM reviews WHERE target_id=? AND valid=1 AND target_version=?",
+                "SELECT 1 FROM reviews r JOIN participants v ON r.reviewer_id=v.id"
+                " WHERE r.target_id=? AND r.valid=1 AND r.target_version=?"
+                " AND v.active=1",
                 (p["id"], p["version"]),
             ).fetchone()
             if review is None:
@@ -431,6 +489,90 @@ def rotate_link(host_token):
     return jsonify({"name": name, "url": f"/p/{new_token}"})
 
 
+@app.post("/api/h/<host_token>/remove")
+def remove_participant(host_token):
+    """主持人在公布前凭主持链接与姓名移除一名成员。
+
+    规则（名单、分配与意见在同一写事务内一起生效，失败不留任何变更）：
+    - 主持链接无效或成员（按姓名）不存在/已移除 → 404；已公布，或移除后留存成员
+      不足 3 人 → 409；请求缺姓名或格式不对 → 400。
+    - 退出者标记为不再留存（active=0）：其个人链接（以及换发前的历史链接）永久失效，
+      之后的状态读取与一切合法写入（改稿、意见、问题、答复、换发）均 404。
+    - 留存成员按原录入顺序重新闭合互评环；退出者发出或收到的意见一律不计入公布条件。
+      仅"原来评退出者"的留存成员（即录入顺序中退出者前面最近的一位留存者）改评下一位
+      留存成员：其旧意见失效（valid=0）并换发新的匿名分配凭据（nonce 更新、gen+1）；
+      其他人的稿件、版本、意见与链接原样保留。不支持补人或恢复。
+    """
+    data = request.get_json(silent=True) or {}
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return err("请指定要移除成员的姓名")
+    name = name.strip()
+    if len(name) > MAX_NAME_LEN:
+        return err(f"姓名不超过 {MAX_NAME_LEN} 字")
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        session = find_session_by_host(conn, host_token)
+        if session is None:
+            conn.rollback()
+            return err("主持链接无效", 404)
+        if session["published"]:
+            conn.rollback()
+            return err("已公布，不能再移除成员", 409)
+        removed = find_participant_by_name(conn, session["id"], name)
+        if removed is None:
+            conn.rollback()
+            return err("本会话中没有该成员", 404)
+
+        active_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM participants"
+            " WHERE session_id=? AND active=1",
+            (session["id"],),
+        ).fetchone()["c"]
+        if active_count <= MIN_PEOPLE:
+            conn.rollback()
+            return err(f"移除后不足 {MIN_PEOPLE} 人，不能移除", 409)
+
+        # 原录入顺序中退出者前面最近的一位留存者：原来由 ta 评退出者，移除后改评下一位
+        predecessor = conn.execute(
+            "SELECT * FROM participants WHERE session_id=? AND active=1 AND position<?"
+            " ORDER BY position DESC LIMIT 1",
+            (session["id"], removed["position"]),
+        ).fetchone()
+        if predecessor is None:
+            predecessor = conn.execute(
+                "SELECT * FROM participants WHERE session_id=? AND active=1 AND position>?"
+                " ORDER BY position LIMIT 1",
+                (session["id"], removed["position"]),
+            ).fetchone()
+
+        # 退出者永久退出：active=0 后其 token 与全部历史链接在所有接口上按不存在处理
+        conn.execute(
+            "UPDATE participants SET active=0 WHERE id=?", (removed["id"],)
+        )
+
+        if predecessor is not None:
+            new_target = get_target(conn, session["id"], predecessor["position"])
+            # 仅 predecessor 的分配改变：旧意见失效 + 换发新的匿名分配凭据；
+            # 其他人的稿件、版本、意见与链接全部保留
+            conn.execute(
+                "UPDATE reviews SET valid=0 WHERE reviewer_id=? AND valid=1",
+                (predecessor["id"],),
+            )
+            conn.execute(
+                "UPDATE participants SET assignment_nonce=?, assignment_gen=assignment_gen+1"
+                " WHERE id=?",
+                (new_assignment_nonce(conn), predecessor["id"]),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return jsonify({"ok": True})
+
+
 # ---------------- 参与端 ----------------
 
 @app.get("/api/p/<token>")
@@ -457,10 +599,12 @@ def participant_state(token):
             "manuscript": me["manuscript"],
             "version": me["version"],
             "published": published,
-            # 匿名：不返回被评稿件作者的姓名
+            # 匿名：不返回被评稿件作者的姓名；credential 是不暴露作者身份的分配凭据，
+            # 提交意见时与稿件版本一并校验
             "assignment": {
                 "manuscript": target["manuscript"],
                 "version": target["version"],
+                "credential": me["assignment_nonce"],
             },
             "my_review": None,
             "received": None,
@@ -473,6 +617,8 @@ def participant_state(token):
                 "content": my_review["content"],
                 "version": my_review["target_version"],
                 "valid": review_is_current(my_review, target),
+                # 失效原因之一：分配改变（原被评成员退出）改评他人，旧意见已作废
+                "target_changed": my_review["target_id"] != target["id"],
             }
             # 评审者视角：我提交的那条意见收到的澄清（公布后才可见，且仅本人可见）
             if published:
@@ -480,9 +626,10 @@ def participant_state(token):
                     find_clarification(conn, my_review["id"])
                 )
         if published:
-            # 匿名：只返回意见内容，不返回评审人任何信息
+            # 匿名：只返回意见内容，不返回评审人任何信息；评审者须仍留存
             row = conn.execute(
-                "SELECT * FROM reviews WHERE target_id=? AND valid=1 AND target_version=?",
+                "SELECT r.* FROM reviews r JOIN participants v ON r.reviewer_id=v.id"
+                " WHERE r.target_id=? AND r.valid=1 AND r.target_version=? AND v.active=1",
                 (me["id"], me["version"]),
             ).fetchone()
             if row is not None:
@@ -545,6 +692,11 @@ def submit_review(token):
         return err(f"意见不能为空且不超过 {MAX_TEXT_LEN} 字")
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
         return err("缺少所读稿件的版本号")
+    # credential 可选：分配从未变过（gen=0）时兼容旧客户端的原提交格式；
+    # 分配改变后（gen>0）必须携带，且类型须为字符串
+    credential = data.get("credential")
+    if credential is not None and not isinstance(credential, str):
+        return err("分配凭据格式不正确")
 
     conn = get_db()
     try:
@@ -560,7 +712,16 @@ def submit_review(token):
             conn.rollback()
             return err("已公布，意见不可再提交或修改", 409)
         target = get_target(conn, me["session_id"], me["position"])
-        # 提交绑定所读稿件版本：过期提交整体拒绝，不覆盖任何已有意见
+        # 先校验分配凭据：分配改变（移除成员导致改评下一位）后，缺少凭据或沿用旧凭据
+        # 一律 409——即使两篇稿件的版本号恰好相同
+        if me["assignment_gen"] > 0 and credential != me["assignment_nonce"]:
+            conn.rollback()
+            return err(
+                "分配已改变，请重新阅读新分配的稿件后再提交",
+                409,
+                assignment_changed=True,
+            )
+        # 再绑定所读稿件版本：过期提交整体拒绝，不覆盖任何已有意见
         if target["version"] != version:
             conn.rollback()
             return err(
@@ -574,6 +735,7 @@ def submit_review(token):
             VALUES (?,?,?,?,?,1,datetime('now'))
             ON CONFLICT(session_id, reviewer_id)
             DO UPDATE SET content=excluded.content,
+                          target_id=excluded.target_id,
                           target_version=excluded.target_version,
                           valid=1,
                           updated_at=datetime('now')
@@ -615,7 +777,8 @@ def ask_clarification(token):
             return err("尚未公布，不能提问", 409)
         # 服务端按个人链接确定身份与对应意见：只能问自己收到的那条有效意见
         review = conn.execute(
-            "SELECT * FROM reviews WHERE target_id=? AND valid=1 AND target_version=?",
+            "SELECT r.* FROM reviews r JOIN participants v ON r.reviewer_id=v.id"
+            " WHERE r.target_id=? AND r.valid=1 AND r.target_version=? AND v.active=1",
             (me["id"], me["version"]),
         ).fetchone()
         if review is None:

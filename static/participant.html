@@ -29,6 +29,12 @@
       <h2>分配给我评审的稿件 <span id="assignment-version" class="muted"></span></h2>
       <pre id="assignment" class="manuscript-view"></pre>
       <p id="assignment-notice" class="pending" hidden>稿件已更新为最新版本，请重新阅读后再提交意见。</p>
+      <div id="assignment-changed" class="clarify" hidden>
+        <p class="pending">原分配成员已退出互评，系统已按原录入顺序把下一位成员的稿件改分配给你。请重新阅读下面这篇稿件，确认后才能提交意见；你已输入的意见文本会保留。</p>
+        <div class="row-actions">
+          <button id="confirm-reread" class="primary" type="button">我已重新阅读，确认评审此稿</button>
+        </div>
+      </div>
     </section>
 
     <section class="card">

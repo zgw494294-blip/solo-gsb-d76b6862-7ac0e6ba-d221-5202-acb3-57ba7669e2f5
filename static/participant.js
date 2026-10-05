@@ -11,6 +11,8 @@ const els = {
   assignment: document.getElementById("assignment"),
   assignmentVersion: document.getElementById("assignment-version"),
   assignmentNotice: document.getElementById("assignment-notice"),
+  assignmentChanged: document.getElementById("assignment-changed"),
+  confirmReread: document.getElementById("confirm-reread"),
   reviewStatus: document.getElementById("review-status"),
   review: document.getElementById("my-review"),
   submitReview: document.getElementById("submit-review"),
@@ -38,6 +40,13 @@ const els = {
 
 let firstLoad = true;
 let assignmentVersionShown = null; // 当前页面展示的（也是提交时绑定的）稿件版本
+let boundCredential = null;        // 已确认绑定的匿名分配凭据（null=尚未载入）
+let lastState = null;              // 最近一次状态快照（确认重读时取其新凭据）
+
+function assignmentGated(s) {
+  // 服务端分配凭据与本页已绑定凭据不一致：原分配成员退出，必须确认重读后才能提交
+  return boundCredential !== null && s.assignment.credential !== boundCredential;
+}
 
 function setMsg(el, text, isError) {
   el.textContent = text || "";
@@ -60,6 +69,7 @@ async function refresh() {
   } catch {
     return; // 网络抖动，下次轮询再试
   }
+  lastState = s;
   render(s);
 }
 
@@ -67,25 +77,36 @@ function render(s) {
   els.name.textContent = s.name;
   els.version.textContent = "v" + s.version;
 
+  // 首次载入：绑定当前分配凭据（无需额外确认，本页即凭新快照打开）
+  if (firstLoad) boundCredential = s.assignment.credential;
+  const gated = assignmentGated(s);
+
   // 只有自己能改自己的稿，首次载入填充即可，避免轮询覆盖正在输入的内容
   if (firstLoad) {
     els.manuscript.value = s.manuscript;
     if (s.my_review) els.review.value = s.my_review.content;
   }
 
-  // 被分配的稿件：版本变化时刷新展示并提示重新阅读
-  if (assignmentVersionShown !== s.assignment.version) {
+  // 被分配的稿件：版本或凭据变化时刷新展示。分配改变（退出者被移除）时展示新稿件，
+  // 但保留意见文本并禁用提交，直到参与者确认重新阅读
+  if (assignmentVersionShown !== s.assignment.version || gated) {
     const hadOld = assignmentVersionShown !== null;
     assignmentVersionShown = s.assignment.version;
     els.assignment.textContent = s.assignment.manuscript;
     els.assignmentVersion.textContent = "v" + s.assignment.version;
-    els.assignmentNotice.hidden = !(hadOld && !s.published);
+    // 仅"稿件版本更新但分配未变"才提示版本更新；分配改变由专门的确认区处理
+    els.assignmentNotice.hidden = !(hadOld && !gated && !s.published);
   }
+  els.assignmentChanged.hidden = !(gated && !s.published);
 
   // 我的意见状态
   if (!s.my_review) {
     els.reviewStatus.textContent = "尚未提交意见。";
     els.reviewStatus.className = "muted";
+  } else if (gated && s.my_review.target_changed) {
+    els.reviewStatus.textContent =
+      "原分配成员已退出，你此前的意见已失效；请重新阅读新分配的稿件并确认后提交。";
+    els.reviewStatus.className = "pending";
   } else if (s.my_review.valid) {
     els.reviewStatus.textContent = "已提交（对应稿件 v" + s.my_review.version + "，当前有效，可修改后重新提交）。";
     els.reviewStatus.className = "ok";
@@ -100,12 +121,16 @@ function render(s) {
   if (s.published) {
     els.publishedBanner.hidden = false;
     els.assignmentNotice.hidden = true;
+    els.assignmentChanged.hidden = true;
     els.manuscript.disabled = true;
     els.saveMs.disabled = true;
     els.review.disabled = true;
     els.submitReview.disabled = true;
     els.receivedSection.hidden = false;
     els.received.textContent = s.received !== null ? s.received : "（无）";
+  } else {
+    // 分配改变、未确认重读前禁用提交（意见文本框保留可编辑）；公布前其余状态可提交
+    els.submitReview.disabled = gated;
   }
 
   renderQuestion(s.published ? s.received_clarification : null);
@@ -113,6 +138,16 @@ function render(s) {
 
   firstLoad = false;
 }
+
+// 参与者确认已重新阅读新分配的稿件：绑定新凭据并启用提交（不清空已输入的意见文本）
+els.confirmReread.addEventListener("click", () => {
+  const latest = lastState;
+  if (latest) boundCredential = latest.assignment.credential;
+  els.assignmentChanged.hidden = true;
+  els.assignmentNotice.hidden = true;
+  if (latest && !latest.published) els.submitReview.disabled = false;
+  setMsg(els.reviewMsg, "已绑定新分配，请在阅读新稿件后提交意见。");
+});
 
 // 作者视角：对收到的匿名意见的一问一答
 function renderQuestion(c) {
@@ -185,12 +220,15 @@ els.submitReview.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         content: els.review.value,
-        version: assignmentVersionShown, // 绑定当前读到的稿件版本
+        version: assignmentVersionShown,   // 绑定当前读到的稿件版本
+        credential: boundCredential,       // 绑定当前确认过的匿名分配凭据
       }),
     });
     const data = await r.json();
     if (!r.ok) {
       setMsg(els.reviewMsg, data.error || "提交失败", true);
+      // 凭据失效/分配改变：立即重新拉取快照以呈现"确认重读"入口（意见文本保留）
+      if (r.status === 409) refresh();
     } else {
       setMsg(els.reviewMsg, "意见已提交。");
       els.assignmentNotice.hidden = true;

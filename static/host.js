@@ -66,7 +66,14 @@ function render(s) {
     rotateBtn.textContent = "换发链接";
     rotateBtn.dataset.name = l.name;
     rotateBtn.dataset.link = location.origin + l.url;
-    tdAction.appendChild(rotateBtn);
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "link-danger remove-member";
+    removeBtn.textContent = "移除成员";
+    removeBtn.dataset.name = l.name;
+    // 公布后不可移除：按钮禁用
+    removeBtn.disabled = !!s.published;
+    tdAction.append(rotateBtn, removeBtn);
     tr.append(tdName, tdLink, tdAction);
     linksBody.appendChild(tr);
   }
@@ -124,6 +131,41 @@ document.getElementById("links").addEventListener("click", async (e) => {
     );
   } catch {
     rotateError.textContent = "网络错误，请重试";
+  }
+  refresh();
+});
+
+// 公布前移除一名退出互评的成员：名单、分配与意见一起生效，不支持补人或恢复
+document.getElementById("links").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button.remove-member");
+  if (!btn) return;
+  const name = btn.dataset.name;
+  const removeError = document.getElementById("remove-error");
+  removeError.textContent = "";
+  if (
+    !confirm(
+      `确定移除「${name}」？\n` +
+        "移除后名单立即按原录入顺序重新闭合互评环（至少保留 3 人），不能补人也不能恢复：\n" +
+        "· 「" + name + "」的个人链接永久失效，其发出或收到的意见不计入公布条件；\n" +
+        "· 只有原来评「" + name + "」的人会改评下一位留存成员，其旧意见失效、需重新阅读提交；\n" +
+        "· 其他人的稿件、版本、意见与链接全部保留。"
+    )
+  )
+    return;
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/h/" + token + "/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      removeError.textContent =
+        "移除「" + name + "」失败：" + (data.error || "请刷新主持台后重试");
+    }
+  } catch {
+    removeError.textContent = "网络错误，请重试";
   }
   refresh();
 });

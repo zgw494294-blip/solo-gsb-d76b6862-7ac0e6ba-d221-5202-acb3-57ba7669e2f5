@@ -112,10 +112,34 @@ def create_session(client):
     return host_token, tokens
 
 
-def submit_review(client, token, content, version):
-    return client.post(
-        f"/api/p/{token}/review", json={"content": content, "version": version}
+def create_named_session(client, names):
+    """按给定姓名（原录入顺序）创建会话，返回 (host_token, {姓名: token})。"""
+    resp = client.post(
+        "/api/sessions",
+        json={"people": [{"name": n, "manuscript": "稿" + n} for n in names]},
     )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    host_token = data["host_url"].rsplit("/", 1)[-1]
+    tokens = {p["name"]: p["url"].rsplit("/", 1)[-1] for p in data["people"]}
+    return host_token, tokens
+
+
+def state(client, token):
+    resp = client.get(f"/api/p/{token}")
+    assert resp.status_code == 200, resp.get_json()
+    return resp.get_json()
+
+
+def remove_member(client, host_token, name):
+    return client.post(f"/api/h/{host_token}/remove", json={"name": name})
+
+
+def submit_review(client, token, content, version, credential=None):
+    payload = {"content": content, "version": version}
+    if credential is not None:
+        payload["credential"] = credential
+    return client.post(f"/api/p/{token}/review", json=payload)
 
 
 def ask(client, token, question):
@@ -895,9 +919,345 @@ class RotateLinkTest(unittest.TestCase):
         self.assertEqual(self.host_links()["甲"], new_jia)
 
 
+class RemoveMemberTest(unittest.TestCase):
+    """公布前移除成员：环闭合、旧链接失效、凭据校验、404/409/400、并发顺序、持久化。"""
+
+    def submit_all_v1(self):
+        """四人各对当前被分配稿件（v1）提交意见，返回 {姓名: 意见文本}。"""
+        reviews = {}
+        for name in self.names:
+            s = state(self.client, self.tokens[name])
+            content = name + "评"
+            resp = submit_review(
+                self.client, self.tokens[name], content, s["assignment"]["version"]
+            )
+            self.assertEqual(resp.status_code, 200, resp.get_json())
+            reviews[name] = content
+        return reviews
+
+    def setUp(self):
+        self.client = new_client()
+        self.names = ["甲", "乙", "丙", "丁"]
+        self.host_token, self.tokens = create_named_session(self.client, self.names)
+
+    def test_remove_closes_ring_and_invalidates_only_predecessor_review(self):
+        # 四人首轮意见全部有效：甲评乙、乙评丙、丙评丁、丁评甲
+        self.submit_all_v1()
+
+        # 移除乙：仅"原来评乙"的甲改评下一位留存者丙
+        self.assertEqual(remove_member(self.client, self.host_token, "乙").status_code, 200)
+
+        s = state(self.client, self.tokens["甲"])
+        self.assertEqual(s["assignment"]["manuscript"], "稿丙")
+        # 甲的旧意见失效，且标注为分配改变所致
+        self.assertFalse(s["my_review"]["valid"])
+        self.assertTrue(s["my_review"]["target_changed"])
+        self.assertEqual(s["my_review"]["content"], "甲评")
+
+        # 乙→丙：乙不再评丙，丙改由……丙仍评丁；丁仍评甲：其他人意见保持有效
+        s_bing = state(self.client, self.tokens["丙"])
+        self.assertEqual(s_bing["assignment"]["manuscript"], "稿丁")
+        self.assertTrue(s_bing["my_review"]["valid"])
+        s_ding = state(self.client, self.tokens["丁"])
+        self.assertEqual(s_ding["assignment"]["manuscript"], "稿甲")
+        self.assertTrue(s_ding["my_review"]["valid"])
+
+        # 乙的稿件、版本不出现在任何人的分配中；主持台名单仅剩甲丙丁
+        host = self.client.get(f"/api/h/{self.host_token}").get_json()
+        self.assertEqual([r["name"] for r in host["reviewers"]], ["甲", "丙", "丁"])
+        self.assertEqual([l["name"] for l in host["links"]], ["甲", "丙", "丁"])
+
+        # 乙发出/收到的意见不计入公布条件：现在只差"丙收到的意见"（原评审者是乙）
+        # 与甲需对丙重交意见 —— 主持台显示甲待交；公布被 409 拒绝
+        pending = {r["name"] for r in host["reviewers"] if not r["submitted"]}
+        self.assertEqual(pending, {"甲"})
+        resp = self.client.post(f"/api/h/{self.host_token}/publish")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(set(resp.get_json()["missing"]), {"丙"})
+
+        # 甲确认重读后用新凭据对丙 v1 重交；丙评丁、丁评甲意见原样有效，随后可公布
+        cred = s["assignment"]["credential"]
+        self.assertEqual(
+            submit_review(
+                self.client, self.tokens["甲"], "甲评丙", 1, credential=cred
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(f"/api/h/{self.host_token}/publish").status_code, 200
+        )
+        # 公布后丙收到的是甲的匿名意见（乙的旧意见不出现），其他意见保留
+        self.assertEqual(state(self.client, self.tokens["丙"])["received"], "甲评丙")
+
+    def test_received_reviews_after_ring_close(self):
+        # 环闭合后各人收到的意见：甲←丁（保留）、丙←甲（重交）、丁←丙（保留）；
+        # 乙收到的甲旧意见与乙发出给丙的意见都不计入
+        self.submit_all_v1()
+        remove_member(self.client, self.host_token, "乙")
+        cred_jia = state(self.client, self.tokens["甲"])["assignment"]["credential"]
+        submit_review(self.client, self.tokens["甲"], "甲评丙新", 1, credential=cred_jia)
+        self.assertEqual(
+            self.client.post(f"/api/h/{self.host_token}/publish").status_code, 200
+        )
+        self.assertEqual(state(self.client, self.tokens["甲"])["received"], "丁评")
+        self.assertEqual(state(self.client, self.tokens["丙"])["received"], "甲评丙新")
+        self.assertEqual(state(self.client, self.tokens["丁"])["received"], "丙评")
+
+    def test_removed_link_dead_on_all_endpoints(self):
+        old_yi = self.tokens["乙"]
+        self.assertEqual(remove_member(self.client, self.host_token, "乙").status_code, 200)
+        # 状态读取与一切合法写入均 404
+        self.assertEqual(self.client.get(f"/api/p/{old_yi}").status_code, 404)
+        self.assertEqual(
+            self.client.put(
+                f"/api/p/{old_yi}/manuscript", json={"manuscript": "偷改"}
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            submit_review(self.client, old_yi, "x", 1).status_code, 404
+        )
+        self.assertEqual(ask(self.client, old_yi, "q").status_code, 404)
+        self.assertEqual(answer(self.client, old_yi, "a").status_code, 404)
+        # 退出者不能再被换发链接（按姓名查不到）
+        resp = self.client.post(
+            f"/api/h/{self.host_token}/rotate-link",
+            json={"name": "乙", "link": f"/p/{old_yi}"},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_remove_first_and_last_positions(self):
+        # 五人：移除首位甲——其原评审者是录入顺序末位的戊，戊改评乙
+        five = ["甲", "乙", "丙", "丁", "戊"]
+        host, tokens = create_named_session(new_client(), five)
+        self.assertEqual(remove_member(self.client, host, "甲").status_code, 200)
+        self.assertEqual(state(new_client(), tokens["戊"])["assignment"]["manuscript"], "稿乙")
+        self.assertEqual(state(new_client(), tokens["乙"])["assignment"]["manuscript"], "稿丙")
+        self.assertEqual(new_client().get(f"/api/p/{tokens['甲']}").status_code, 404)
+        # 现存 乙丙丁戊；移除末位（现存末位）丁：丙改评戊，戊仍评乙
+        self.assertEqual(remove_member(new_client(), host, "丁").status_code, 200)
+        self.assertEqual(state(new_client(), tokens["丙"])["assignment"]["manuscript"], "稿戊")
+        self.assertEqual(state(new_client(), tokens["戊"])["assignment"]["manuscript"], "稿乙")
+
+    def test_404_host_or_member(self):
+        self.assertEqual(remove_member(self.client, "假主持", "乙").status_code, 404)
+        self.assertEqual(remove_member(self.client, self.host_token, "某人").status_code, 404)
+        # 失败不留变更：分配仍是原环（甲评乙）
+        self.assertEqual(
+            state(self.client, self.tokens["甲"])["assignment"]["manuscript"], "稿乙"
+        )
+        # 已移除者再次操作（公布前）也是 404：不支持恢复
+        self.assertEqual(remove_member(self.client, self.host_token, "乙").status_code, 200)
+        self.assertEqual(remove_member(self.client, self.host_token, "乙").status_code, 404)
+        # 第二次（对已退出者）失败不留变更：环仍是甲丙丁，甲评丙
+        self.assertEqual(
+            state(self.client, self.tokens["甲"])["assignment"]["manuscript"], "稿丙"
+        )
+        self.assertEqual(
+            self.client.get(f"/api/p/{self.tokens['乙']}").status_code, 404
+        )
+
+    def test_409_when_fewer_than_three_and_after_publish(self):
+        # 四人移除一人后只剩三人，再次移除即 409
+        self.assertEqual(remove_member(self.client, self.host_token, "乙").status_code, 200)
+        resp = remove_member(self.client, self.host_token, "丙")
+        self.assertEqual(resp.status_code, 409)
+        # 409 不留变更：丙仍在
+        self.assertEqual(
+            self.client.get(f"/api/p/{self.tokens['丙']}").status_code, 200
+        )
+        # 三人会话直接移除即 409
+        host3, tokens3 = create_session(new_client())
+        self.assertEqual(remove_member(new_client(), host3, "甲").status_code, 409)
+        # 公布后移除 409
+        publish_with_reviews(new_client(), host3, tokens3)
+        self.assertEqual(remove_member(new_client(), host3, "甲").status_code, 409)
+
+    def test_400_malformed_request(self):
+        for payload in [{}, {"name": "  "}, {"name": "x" * (app_module.MAX_NAME_LEN + 1)}, []]:
+            resp = self.client.post(
+                f"/api/h/{self.host_token}/remove", json=payload
+            )
+            self.assertEqual(resp.status_code, 400, payload)
+
+    def test_credential_required_only_after_assignment_change(self):
+        # 分配从未变过：兼容不带 credential 的原提交格式
+        self.assertEqual(
+            submit_review(self.client, self.tokens["甲"], "甲评乙", 1).status_code, 200
+        )
+        # 乙改稿（分配不变）后，无凭据旧格式仍然接受
+        self.assertEqual(
+            self.client.put(
+                f"/api/p/{self.tokens['乙']}/manuscript",
+                json={"manuscript": "稿乙v2"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            submit_review(self.client, self.tokens["甲"], "甲评乙v2", 2).status_code, 200
+        )
+
+        # 移除丁：仅丙的分配改变（丁→甲）；甲、乙的凭据不变
+        self.assertEqual(remove_member(self.client, self.host_token, "丁").status_code, 200)
+        cred_bing = state(self.client, self.tokens["丙"])["assignment"]["credential"]
+        # 甲的分配未变：旧格式继续可用
+        self.assertEqual(
+            submit_review(self.client, self.tokens["甲"], "甲改意见", 2).status_code, 200
+        )
+        # 丙缺少凭据 -> 409；甲、丁均为 v1，即使版本号相同也拒绝
+        resp = submit_review(self.client, self.tokens["丙"], "丙无凭据", 1)
+        self.assertEqual(resp.status_code, 409)
+        self.assertTrue(resp.get_json()["assignment_changed"])
+        # 丙沿用旧（错误）凭据 -> 409，即使版本相同
+        resp = submit_review(
+            self.client, self.tokens["丙"], "丙旧凭据", 1, credential="旧的随便什么"
+        )
+        self.assertEqual(resp.status_code, 409)
+        # 失败不覆盖：丙此前未提交过，移除后仍没有任何意见行
+        self.assertIsNone(
+            state(self.client, self.tokens["丙"])["my_review"]
+        )
+        # 新凭据 + 正确版本提交成功
+        self.assertEqual(
+            submit_review(
+                self.client, self.tokens["丙"], "丙评甲", 1, credential=cred_bing
+            ).status_code,
+            200,
+        )
+        # credential 类型错误 -> 400
+        resp = self.client.post(
+            f"/api/p/{self.tokens['丙']}/review",
+            json={"content": "x", "version": 1, "credential": 123},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_others_manuscripts_versions_links_preserved(self):
+        # 乙改稿到 v2 并持有甲的有效意见；丁有一轮意见；移除乙
+        self.client.put(
+            f"/api/p/{self.tokens['乙']}/manuscript", json={"manuscript": "稿乙二改"}
+        )
+        submit_review(self.client, self.tokens["甲"], "甲评乙v2", 2)
+        submit_review(self.client, self.tokens["丁"], "丁评甲", 1)
+        bing_old_link = self.tokens["丙"]
+        remove_member(self.client, self.host_token, "乙")
+
+        # 甲自己的稿件与版本不变；丙、丁的稿件/版本/链接不变
+        self.assertEqual(
+            state(self.client, self.tokens["甲"])["manuscript"], "稿甲"
+        )
+        s = state(self.client, bing_old_link)
+        self.assertEqual((s["manuscript"], s["version"]), ("稿丙", 1))
+        self.assertEqual(
+            state(self.client, self.tokens["丁"])["assignment"]["manuscript"], "稿甲"
+        )
+        # 丁对甲的意见仍有效；甲的意见因改评而失效，乙的稿件不影响他人
+        self.assertTrue(
+            state(self.client, self.tokens["丁"])["my_review"]["valid"]
+        )
+
+    def test_submit_first_then_remove_invalidates_and_reopens(self):
+        # 甲已对乙 v1 提交有效意见；移除乙：名单/分配/意见一起生效，甲的意见随即失效，
+        # 公布条件不再计入乙，且甲需对新分配重交
+        submit_review(self.client, self.tokens["甲"], "甲评乙", 1)
+        submit_review(self.client, self.tokens["丙"], "丙评丁", 1)
+        remove_member(self.client, self.host_token, "乙")
+        s = state(self.client, self.tokens["甲"])
+        self.assertFalse(s["my_review"]["valid"])
+        self.assertTrue(s["my_review"]["target_changed"])
+        resp = self.client.post(f"/api/h/{self.host_token}/publish")
+        self.assertEqual(resp.status_code, 409)
+
+    def test_concurrent_remove_first_submit_rejected_with_old_credential(self):
+        """移除先拿到写锁：甲（原评乙）的提交在移除提交后才继续，凭据已换代 → 409。"""
+        cred_jia = state(self.client, self.tokens["甲"])["assignment"]["credential"]
+        remove_entered = threading.Event()
+        release_remove = threading.Event()
+        submit_begin = threading.Event()
+        tls = threading.local()
+        armed = {"remove": True}
+
+        def hook(_wrapper, sql):
+            if armed["remove"] and "UPDATE PARTICIPANTS SET ASSIGNMENT_NONCE" in sql.upper():
+                armed["remove"] = False
+                remove_entered.set()
+                self.assertTrue(release_remove.wait(10), "移除未被释放")
+
+        def pre_hook(_wrapper, sql):
+            if getattr(tls, "submitter", False) and sql.lstrip().upper().startswith("BEGIN IMMEDIATE"):
+                self.assertFalse(release_remove.is_set())
+                submit_begin.set()
+
+        result = {}
+
+        def remover():
+            tls.remover = True
+            with use_wrapped_db(hook, pre_hook=pre_hook):
+                result["remove"] = remove_member(
+                    new_client(), self.host_token, "乙"
+                ).status_code
+
+        t = threading.Thread(target=remover)
+        t.start()
+        self.assertTrue(remove_entered.wait(10), "移除未进入凭据换发阶段")
+
+        def submitter():
+            tls.submitter = True
+            with use_wrapped_db(hook, pre_hook=pre_hook):
+                result["submit"] = submit_review(
+                    new_client(), self.tokens["甲"], "甲卡在旧凭据", 1,
+                    credential=cred_jia,
+                ).status_code
+
+        w = threading.Thread(target=submitter)
+        w.start()
+        self.assertTrue(submit_begin.wait(10), "提交未发起写事务")
+        time.sleep(0.2)
+        self.assertNotIn("submit", result)
+        release_remove.set()
+        t.join(10)
+        w.join(10)
+        self.assertFalse(t.is_alive() or w.is_alive())
+        self.assertEqual(result["remove"], 200)
+        self.assertEqual(result["submit"], 409)
+        # 甲的旧意见不存在（此前未提交）；新分配为丙，需用新凭据
+        s = state(self.client, self.tokens["甲"])
+        self.assertEqual(s["assignment"]["manuscript"], "稿丙")
+        self.assertIsNone(s["my_review"])
+
+    def test_persistence_across_restart(self):
+        self.submit_all_v1()
+        cred_before = state(self.client, self.tokens["甲"])["assignment"]["credential"]
+        remove_member(self.client, self.host_token, "乙")
+        new_cred = state(self.client, self.tokens["甲"])["assignment"]["credential"]
+        self.assertNotEqual(cred_before, new_cred)
+
+        # 模拟重启：幂等建表/补列，数据在同一 SQLite 文件中
+        app_module.init_db()
+        # 乙仍永久失效；甲仍改评丙、凭据不变；甲的旧意见仍失效
+        self.assertEqual(self.client.get(f"/api/p/{self.tokens['乙']}").status_code, 404)
+        s = state(self.client, self.tokens["甲"])
+        self.assertEqual(s["assignment"]["manuscript"], "稿丙")
+        self.assertEqual(s["assignment"]["credential"], new_cred)
+        self.assertFalse(s["my_review"]["valid"])
+        # 旧凭据重启后仍 409；新凭据可提交并完成公布
+        self.assertEqual(
+            submit_review(
+                self.client, self.tokens["甲"], "甲评丙", 1, credential=cred_before
+            ).status_code,
+            409,
+        )
+        submit_review(self.client, self.tokens["甲"], "甲评丙", 1, credential=new_cred)
+        self.assertEqual(
+            self.client.post(f"/api/h/{self.host_token}/publish").status_code, 200
+        )
+        # 丙/丁稿件版本链接保留；乙链接重启后仍 404
+        self.assertEqual(
+            self.client.get(f"/api/p/{self.tokens['乙']}").status_code, 404
+        )
+
+
 class OldSchemaMigrationTest(unittest.TestCase):
-    """旧库启动时自动支持问答与换发存储：补建 clarifications/token_history，旧数据保留。"""
-    """旧库启动时自动支持问答存储：补建 clarifications，旧数据保留，重启后内容保留。"""
+    """旧库启动时自动支持问答、换发与移除存储：补表/补列/回填凭据，旧数据保留。"""
 
     OLD_SCHEMA = """
     CREATE TABLE sessions (
@@ -990,6 +1350,72 @@ class OldSchemaMigrationTest(unittest.TestCase):
             data = client.get(f"/api/p/{new_tk}").get_json()
             self.assertEqual(data["received_clarification"]["question"], "旧库追问")
             self.assertEqual(client.get("/api/p/tk").status_code, 404)
+        finally:
+            app_module.DB_PATH = original
+
+    def test_old_db_supports_remove_after_auto_upgrade(self):
+        """旧库补列并回填凭据后：可移除成员，环闭合、凭据换代；重启后状态保留。"""
+        tmp_dir = tempfile.mkdtemp(prefix="review-olddb-remove-")
+        old_path = os.path.join(tmp_dir, "old.db")
+        conn = sqlite3.connect(old_path)
+        conn.executescript(self.OLD_SCHEMA)
+        conn.execute("INSERT INTO sessions (id, host_token, published) VALUES (1,'ht',0)")
+        for i, n in enumerate(["甲", "乙", "丙", "丁"]):
+            conn.execute(
+                "INSERT INTO participants (id, session_id, token, name, position, manuscript, version)"
+                " VALUES (?,?,?,?,?,?,1)",
+                (i + 1, 1, "t" + n, n, i, "稿" + n),
+            )
+        conn.commit()
+        conn.close()
+
+        original = app_module.DB_PATH
+        app_module.DB_PATH = old_path
+        try:
+            app_module.init_db()
+            # 补列齐全且为既有成员回填了非空凭据
+            c = sqlite3.connect(old_path)
+            try:
+                cols = {r[1] for r in c.execute("PRAGMA table_info(participants)")}
+                empty_nonce = c.execute(
+                    "SELECT COUNT(*) FROM participants WHERE assignment_nonce=''"
+                ).fetchone()[0]
+                gen_values = {r[0] for r in c.execute("SELECT assignment_gen FROM participants")}
+            finally:
+                c.close()
+            self.assertTrue({"active", "assignment_nonce", "assignment_gen"} <= cols)
+            self.assertEqual(empty_nonce, 0)
+            self.assertEqual(gen_values, {0})
+
+            client = new_client()
+            # 旧库回填 gen=0：分配从未变过，不带凭据的旧提交格式兼容
+            self.assertEqual(
+                submit_review(client, "t甲", "甲评乙", 1).status_code, 200
+            )
+            # 旧库上直接支持移除：乙退出，甲改评丙并换代凭据
+            self.assertEqual(remove_member(client, "ht", "乙").status_code, 200)
+            self.assertEqual(client.get("/api/p/t乙").status_code, 404)
+            s = client.get("/api/p/t甲").get_json()
+            self.assertEqual(s["assignment"]["manuscript"], "稿丙")
+            self.assertFalse(s["my_review"]["valid"])
+            self.assertTrue(s["my_review"]["target_changed"])
+            # 换代后无凭据/旧格式被 409
+            self.assertEqual(submit_review(client, "t甲", "旧格式", 1).status_code, 409)
+            self.assertEqual(
+                submit_review(
+                    client, "t甲", "甲评丙", 1, credential=s["assignment"]["credential"]
+                ).status_code,
+                200,
+            )
+
+            # 重启：补列幂等，乙仍 404、甲仍评丙且凭据不变，其他人链接保留
+            app_module.init_db()
+            self.assertEqual(client.get("/api/p/t乙").status_code, 404)
+            s2 = client.get("/api/p/t甲").get_json()
+            self.assertEqual(s2["assignment"]["manuscript"], "稿丙")
+            self.assertEqual(s2["assignment"]["credential"], s["assignment"]["credential"])
+            self.assertEqual(client.get("/api/p/t丙").status_code, 200)
+            self.assertEqual(client.get("/api/p/t丁").status_code, 200)
         finally:
             app_module.DB_PATH = original
 
